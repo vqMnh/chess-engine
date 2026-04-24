@@ -6,10 +6,11 @@ The neural network uses MCTS-guided self-play to iteratively improve without any
 
 ## Current state
 - Scaffold complete; venv initialized with all deps installed and verified (`chess`, `torch`, `torchvision`, `numpy`, `tqdm`)
-- All `src/` modules exist as stubs (docstring + imports only) — no logic implemented yet
+- `game.py` fully implemented and tested — board encoding, move index round-trips, legal-move mask, result, opening book lookup all pass
+- All other `src/` modules are stubs (docstring + imports only) — ready for implementation
 - Colab notebook has 5 empty cells: Mount Drive, Install deps, Import, Train, Resume
 - `checkpoints/`, `data/`, `books/`, `runs/` directories created; `runs/elo_log.csv` seeded with header
-- No opening book `.bin` file in `books/` yet — must be added manually before that feature is usable
+- Opening book present at `books/gm2001.bin`
 
 ## Architecture
 - **MCTS search** — guides move selection during self-play using UCB/PUCT
