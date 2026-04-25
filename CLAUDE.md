@@ -9,14 +9,14 @@ All modules fully implemented and tested. Training runs on Google Colab Pro (A10
 
 | Module | Status | Notes |
 |---|---|---|
-| `game.py` | ✅ complete | Board encoding, move↔index, legal-move mask, result, opening book (no clone) |
+| `game.py` | ✅ complete | Board encoding, move↔index, legal-move mask, result, opening book (reader kept open per game, no claim_draw) |
 | `model.py` | ✅ complete | ResNet 10×128, policy+value heads, save/load with arch config |
 | `mcts.py` | ✅ complete | PUCT, Dirichlet noise, push/pop (no clone), module-level primitives |
-| `self_play.py` | ✅ complete | Batched `generate_games_batched` — all games in parallel, one NN pass per sim step |
+| `self_play.py` | ✅ complete | Batched self-play — set-based active tracking, batched GPU→CPU, single legal-moves call, iter/s logging |
 | `replay_buffer.py` | ✅ complete | Circular deque, sample, save/load (.npz) |
 | `trainer.py` | ✅ complete | CE+MSE loss, cosine LR, checkpoint (model+optimizer) |
 | `evaluator.py` | ✅ complete | Head-to-head eval, promotion logic, ELO log |
-| `main.py` | ✅ complete | Full loop, auto-resume, torch.compile, batched self-play |
+| `main.py` | ✅ complete | Full loop, auto-resume, per-phase timing, training banner, per-iteration CSV log |
 | `train_colab.ipynb` | ✅ complete | 5 cells: Mount Drive, Deps, Import, Train, Resume |
 
 Colab Drive path: `/content/drive/MyDrive/chess-engine`
@@ -41,41 +41,58 @@ Colab Drive path: `/content/drive/MyDrive/chess-engine`
 - Root primed to `visit_count=1` before simulations so first PUCT exploration is non-zero
 - Dirichlet noise (`α=0.3, ε=0.25`) added at root during self-play only
 
+### Opening book (`game.py`)
+- `ChessGame.__init__` opens the Polyglot reader once and stores it in `self._book_reader`
+- `book_move()` uses the stored reader directly — no file I/O per call
+- On the first position not in the book, `_book_exhausted` is set and the reader is closed
+- `is_game_over()` uses `claim_draw=False` — only checks checkmate/stalemate (O(1))
+  - Draws by repetition/50-move are handled implicitly by the `max_moves` cap
+  - Using `claim_draw=True` was the second major bottleneck (walked move history at every tree level): removing it gave a **4× speedup** (5 → 21 iter/s)
+
 ### Batched self-play (`self_play.py`)
-- `generate_games_batched(num_games=100)` runs all games in parallel
+- `generate_games_batched(num_games=100)` runs all games in parallel; returns `(examples, avg_moves)`
 - Every outer iteration: selection on all active games → leaf states stacked → **one forward pass**
-- Reduces GPU round-trips from 250k × batch=1 to ~10k × batch≈100 on A100
-- bfloat16 autocast on CUDA (A100 native precision, 2× throughput over fp32)
-- Temperature schedule: `τ=1.0` for first 30 half-moves, `τ=0.0` after
-- Book moves advanced without MCTS and excluded from the training buffer
+- `active` games tracked as a `set` for O(1) removal
+- GPU→CPU transfer batched once before the expand loop (`logits_batch.float().cpu().numpy()`)
+- `legal_move_indices()` called once per expansion, reused for mask, Dirichlet noise, and node children
+- Logs every 500 outer iterations: active count, iter/s, elapsed; summary line on completion
+- **Real bottleneck**: Python MCTS overhead (python-chess `push`/`pop` per tree level). GPU is ~1% of wall time. Ceiling is ~50–60 iter/s with python-chess regardless of GPU.
 
 ### Training loop (`main.py`)
-- `torch.compile(net, mode="reduce-overhead")` wraps inference net; shares weights with training net
-- Compile warmup ~2–3 min on first iteration, then negligible
-- Per-iteration: self-play → buffer → train (500 steps) → eval every 5 iters
+- **No `torch.compile`** — `reduce-overhead` mode uses CUDA Graphs which require fixed input shapes; our dynamic batch size (shrinks as games finish) triggered recompilation on every new size, adding overhead instead of saving it
+- Prints a training banner at startup (device, all params) and session-elapsed time per iteration
+- Per-phase timing printed: `[sp_secs]`, `[tr_secs]`, `[ev_secs]`
+- Per-iteration CSV log appended to `runs/train_log.csv`: `iteration, sp_time_s, avg_moves, examples, train_loss, pol_loss, val_loss, iter_time_s`
+- Per-iteration: self-play → buffer → train (200 steps) → eval every 5 iters
 - Promotion: new net replaces best net if `(wins + 0.5×draws) / total ≥ 0.55`
 - ELO diff logged: `400 × log10(win_rate / (1 − win_rate))`
 
-## A100 performance (Colab Pro)
+## A100 performance (Colab Pro) — measured
 
-| Phase | Unbatched (old) | Batched (current) |
+Current parameters: `mcts_sims=100`, `max_game_moves=250`, `train_steps=200`, `eval_games=20`
+
+| Phase | Time |
+|---|---|
+| Self-play iter 1 (random network, avg 134 moves/game) | ~607s (~10 min) |
+| Self-play later iters (network improves, games shorten) | ~3–6 min (estimate) |
+| Training (200 steps, bs=512) | ~6s |
+| Eval amortised (÷5, 20 games, 100 sims) | ~TBD |
+| **Total iter 1** | **~613s** |
+
+**iter/s behaviour**: starts at ~21 iter/s (100 active games), accelerates to ~160 iter/s as games finish (fewer active games = less Python per outer iter). Overall average for iter 1: **39.6 iter/s**, 24,001 outer iterations.
+
+Colab Pro compute: ~5.37 units/hour on A100, ~62 units/month → ~11.5 hours/month → ~70 iterations/month at current speed.
+
+### ELO milestones (100 sims/move)
+| Iterations | ELO | What it plays like |
 |---|---|---|
-| Self-play (100 games) | ~20 min | ~25 s |
-| Training (500 steps, bs=512) | ~20 s | ~15 s |
-| Eval amortised (÷5) | ~3 min | ~25 s |
-| **Total per iteration** | **~25 min** | **~1 min** |
+| 50 | ~700 | Stops blundering randomly |
+| 150 | ~1000 | Basic tactics |
+| 300 | ~1300 | Simple checkmate patterns |
+| 500 | ~1400–1500 | Solid amateur play |
+| 1000 | ~1500–1700 | Approaching model ceiling |
 
-1000 iterations ≈ one 12-hour Colab session.
-
-### ELO milestones (absolute vs fixed benchmark)
-| Iterations | Wall time | ELO |
-|---|---|---|
-| 50 | ~1 h | ~800 |
-| 150 | ~3 h | ~1100 |
-| 300 | ~5 h | ~1400 |
-| 1000 | ~17 h | ~1700–1900 |
-
-Ceiling ~1700–1900 set by model size (10×128) and sim count (200). Not a training-time limit.
+Ceiling ~1500–1700 set by model size (10×128) and sim count (100). Increasing `mcts_sims` to 200 raises ceiling to ~1700–1900 at ~2× iteration cost.
 
 ## Key implementation details
 
@@ -87,7 +104,7 @@ Ceiling ~1700–1900 set by model size (10×128) and sim count (200). Not a trai
 | Value loss | MSE: `(v_pred − z)²` |
 | Optimizer | Adam, lr=1e-3, cosine decay to 1e-5 per training call |
 | Replay buffer | 500k examples max, deque eviction |
-| Evaluation | 40 games, half as White / half as Black, temp=0, no noise |
+| Evaluation | 20 games, half as White / half as Black, temp=0, no noise |
 
 ## Checkpoints
 
@@ -98,6 +115,7 @@ Ceiling ~1700–1900 set by model size (10×128) and sim count (200). Not a trai
 | `checkpoints/state.pt` | `{"iteration": N}` — resume marker |
 | `data/buffer.npz` | Full replay buffer (states, policies, values) |
 | `runs/elo_log.csv` | `iteration, wins, draws, losses, win_rate, elo_diff, promoted` |
+| `runs/train_log.csv` | `iteration, sp_time_s, avg_moves, examples, train_loss, pol_loss, val_loss, iter_time_s` |
 
 ## Environment setup
 This project uses a dedicated virtual environment. **Never install packages globally.**
@@ -128,13 +146,14 @@ chess-engine/
 │   ├── replay_buffer.py       ← circular buffer, sample, save/load
 │   ├── trainer.py             ← CE+MSE loss, cosine LR, checkpointing
 │   ├── evaluator.py           ← head-to-head eval, promotion, ELO log
-│   └── main.py                ← orchestration loop, torch.compile, auto-resume
+│   └── main.py                ← orchestration loop, per-iteration CSV log, auto-resume
 ├── checkpoints/               ← model weights (synced to Drive)
 ├── data/                      ← replay buffer snapshots (synced to Drive)
 ├── books/
 │   └── gm2001.bin             ← Polyglot opening book
 ├── runs/
-│   └── elo_log.csv            ← ELO log (header pre-seeded)
+│   ├── elo_log.csv            ← eval results (written every eval_every iters)
+│   └── train_log.csv          ← per-iteration metrics (written every iteration)
 └── notebooks/
     └── train_colab.ipynb      ← 5-cell Colab entry point
 ```
@@ -151,6 +170,8 @@ chess-engine/
 - **Drive Desktop** syncs the local project folder automatically
 - Colab sees it at `/content/drive/MyDrive/chess-engine`
 - Checkpoints written by Colab sync back to local automatically — no manual steps
+- If Drive disconnects mid-session: remount (Cell 1) then resume (Cell 5) if past iter 10, else fresh start (Cell 4)
+- `OSError: [Errno 107] Transport endpoint is not connected` = Drive FUSE disconnected; remount and retry
 
 ## What NOT to do
 - Don't install packages outside the venv
@@ -158,3 +179,7 @@ chess-engine/
 - Don't hardcode local paths — use `pathlib.Path` relative to project root
 - Don't run full training locally — use Colab for anything GPU-heavy
 - Don't call `generate_games_batched` with `max_game_moves=` — the parameter is `max_moves=`
+- Don't reopen the Polyglot reader inside `book_move()` — it must stay open from `__init__`
+- Don't use `torch.compile(mode="reduce-overhead")` — dynamic batch sizes cause CUDA graph recompilation per new size, adding overhead; no compile is faster here
+- Don't use `claim_draw=True` in `is_game_over()` — walks full move history at every tree node, was a 4× slowdown
+- Don't move `logits_batch[k].cpu()` inside the expand loop — batch the GPU→CPU transfer before the loop
