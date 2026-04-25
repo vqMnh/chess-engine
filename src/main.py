@@ -1,5 +1,6 @@
 """Entry point: orchestrates the self-play → train → evaluate loop."""
 
+import time
 import torch
 from pathlib import Path
 
@@ -16,6 +17,7 @@ def train(
     data_dir:        Path  = Path("data"),
     book_path:       Path  = Path("books/gm2001.bin"),
     elo_log_path:    Path  = Path("runs/elo_log.csv"),
+    train_log_path:  Path  = Path("runs/train_log.csv"),
     # --- Architecture ---
     num_blocks:  int = 10,
     num_filters: int = 128,
@@ -58,7 +60,20 @@ def train(
     6. Checkpoint         →  every save_every iters: weights + buffer → disk
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    session_start = time.perf_counter()
+
+    W = 56
+    print("=" * W)
+    print("  Chess Engine — Training")
+    print("=" * W)
+    print(f"  device       : {device}" + (
+        f"  ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""
+    ))
+    print(f"  self-play    : {games_per_iter} games  ·  {mcts_sims} sims/move  ·  max {max_game_moves} moves")
+    print(f"  training     : {train_steps} steps/iter  ·  batch {batch_size}")
+    print(f"  evaluation   : every {eval_every} iters  ·  {eval_games} games  ·  {eval_sims} sims")
+    print(f"  loop         : {num_iters} iters  ·  save every {save_every}")
+    print("=" * W)
 
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -110,38 +125,69 @@ def train(
         print(f"Resuming from iteration {start_iter}")
 
     # ------------------------------------------------------------------
+    # Per-iteration CSV log
+    # ------------------------------------------------------------------
+    def _log_iter(row: dict) -> None:
+        train_log_path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not train_log_path.exists() or train_log_path.stat().st_size == 0
+        with open(train_log_path, "a") as f:
+            if write_header:
+                f.write("iteration,sp_time_s,avg_moves,examples,train_loss,"
+                        "pol_loss,val_loss,iter_time_s\n")
+            f.write(
+                f"{row['iteration']},{row['sp_time_s']:.1f},{row['avg_moves']:.1f},"
+                f"{row['examples']},{row.get('train_loss', '')},"
+                f"{row.get('pol_loss', '')},{row.get('val_loss', '')},"
+                f"{row['iter_time_s']:.1f}\n"
+            )
+
+    # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
     for iteration in range(start_iter, num_iters + 1):
+        iter_start  = time.perf_counter()
+        elapsed_hms = time.strftime("%H:%M:%S", time.gmtime(iter_start - session_start))
         print(f"\n{'='*56}")
-        print(f"  Iteration {iteration}/{num_iters}")
+        print(f"  Iteration {iteration}/{num_iters}  [+{elapsed_hms}]")
         print(f"{'='*56}")
+        log_row: dict = {"iteration": iteration}
 
         # 1. Batched self-play ----------------------------------------
         net.eval()
-        examples = generate_games_batched(
+        t0 = time.perf_counter()
+        examples, avg_moves = generate_games_batched(
             inference_net, device,
             num_games        = games_per_iter,
             num_simulations  = mcts_sims,
             book_path        = book,
             max_moves        = max_game_moves,
         )
+        sp_secs = time.perf_counter() - t0
         buffer.add(examples)
-        print(f"  self-play : +{len(examples):>5} examples  {buffer}")
+        log_row.update(sp_time_s=sp_secs, avg_moves=avg_moves, examples=len(examples))
+        print(f"  self-play : +{len(examples):>5} examples  {buffer}  [{sp_secs:.1f}s]")
 
         # 2. Training -------------------------------------------------
         if buffer.is_ready(min_buffer):
             net.train()
+            t0 = time.perf_counter()
             metrics = trainer.train(buffer, num_steps=train_steps)
+            tr_secs = time.perf_counter() - t0
+            log_row.update(
+                train_loss=f"{metrics['loss']:.4f}",
+                pol_loss=f"{metrics['policy_loss']:.4f}",
+                val_loss=f"{metrics['value_loss']:.4f}",
+            )
             print(
                 f"  train     : loss={metrics['loss']:.4f}  "
                 f"pol={metrics['policy_loss']:.4f}  "
-                f"val={metrics['value_loss']:.4f}"
+                f"val={metrics['value_loss']:.4f}  [{tr_secs:.1f}s]"
             )
 
             # 3. Evaluation -------------------------------------------
             if iteration % eval_every == 0:
                 net.eval()
+                t0 = time.perf_counter()
                 promoted, stats = evaluator.evaluate(
                     net, best_net,
                     book_path  = book,
@@ -149,11 +195,12 @@ def train(
                     elo_log_path = elo_log_path,
                     iteration  = iteration,
                 )
+                ev_secs = time.perf_counter() - t0
                 tag = "PROMOTED" if promoted else "not promoted"
                 print(
                     f"  eval      : W={stats['wins']} D={stats['draws']} "
                     f"L={stats['losses']}  wr={stats['win_rate']:.3f}  "
-                    f"elo_diff={stats['elo_diff']:+.1f}  [{tag}]"
+                    f"elo_diff={stats['elo_diff']:+.1f}  [{tag}]  [{ev_secs:.1f}s]"
                 )
                 if promoted:
                     best_net.load_state_dict(net.state_dict())
@@ -162,7 +209,11 @@ def train(
         else:
             print(f"  train     : waiting for buffer ({len(buffer)}/{min_buffer})")
 
-        # 4. Periodic checkpoint (always runs) ------------------------
+        # 4. Log iteration metrics ------------------------------------
+        log_row["iter_time_s"] = time.perf_counter() - iter_start
+        _log_iter(log_row)
+
+        # 5. Periodic checkpoint (always runs) ------------------------
         if iteration % save_every == 0:
             trainer.save_checkpoint(trainer_ckpt)
             buffer.save(buffer_ckpt)

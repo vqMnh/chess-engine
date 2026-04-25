@@ -1,5 +1,6 @@
 """Batched self-play: generates (state, π, z) training tuples via parallel MCTS-guided games."""
 
+import time
 import numpy as np
 import torch
 import chess
@@ -52,12 +53,29 @@ def generate_games_batched(
 
     active: set[int] = set(range(num_games))   # indices of games still running
     _loop_iter = 0
+    _t_start          = time.perf_counter()
+    _t_window_start   = _t_start
+    _iter_window_start = 0
+    print(f"  [sp] starting  {num_games} games  {num_simulations} sims/move  "
+          f"max {max_moves} moves", flush=True)
 
     # ── main loop: one simulation step per active game per iteration ──────
     while active:
         _loop_iter += 1
-        if _loop_iter <= 3 or _loop_iter % 500 == 0:
-            print(f"  [dbg] loop iter {_loop_iter}, active={len(active)}", flush=True)
+        if _loop_iter % 500 == 0:
+            now                = time.perf_counter()
+            elapsed            = now - _t_start
+            window_iters       = _loop_iter - _iter_window_start
+            window_secs        = now - _t_window_start
+            rate               = window_iters / window_secs if window_secs > 1e-6 else 0.0
+            done               = num_games - len(active)
+            _t_window_start    = now
+            _iter_window_start = _loop_iter
+            print(
+                f"  [sp] iter {_loop_iter:>7,}  active={len(active):>3}/{num_games}"
+                f"  done={done:>3}  {rate:>6.1f} iter/s  elapsed={elapsed:.0f}s",
+                flush=True,
+            )
 
         # ── 1. advance book moves; flush games that have enough sims ─────
         finished: list[int] = []
@@ -199,4 +217,14 @@ def generate_games_batched(
         for state, policy, turn in bufs[i]:
             z = float(result) if turn == chess.WHITE else -float(result)
             examples.append((state, policy, z))
-    return examples
+
+    sp_secs    = time.perf_counter() - _t_start
+    avg_moves  = sum(plies) / num_games if num_games else 0.0
+    final_rate = _loop_iter / sp_secs if sp_secs > 1e-6 else 0.0
+    print(
+        f"  [sp] done  {num_games} games  {len(examples)} examples"
+        f"  avg {avg_moves:.0f} moves/game  {_loop_iter:,} outer iters"
+        f"  {final_rate:.1f} iter/s  {sp_secs:.1f}s",
+        flush=True,
+    )
+    return examples, avg_moves
