@@ -152,6 +152,10 @@ class ChessGame:
     def __init__(self, book_path: Path | None = None):
         self.board = chess.Board()
         self._book_path = Path(book_path) if book_path is not None else None
+        self._book_reader = None
+        self._book_exhausted = False
+        if self._book_path is not None and self._book_path.exists():
+            self._book_reader = chess.polyglot.open_reader(self._book_path)
 
     # --- Lifecycle ---
 
@@ -198,7 +202,7 @@ class ChessGame:
     # --- Termination / result ---
 
     def is_game_over(self) -> bool:
-        return self.board.is_game_over(claim_draw=True)
+        return self.board.is_game_over(claim_draw=False)
 
     def result(self) -> float | None:
         """Result from White's perspective: 1=White wins, −1=Black wins, 0=draw.
@@ -221,11 +225,13 @@ class ChessGame:
         Falls back to None silently if the book file is missing or the position
         has no book entry, so callers can always hand off to MCTS transparently.
         """
-        if self._book_path is None or not self._book_path.exists():
+        if self._book_reader is None or self._book_exhausted:
             return None
         try:
-            with chess.polyglot.open_reader(self._book_path) as reader:
-                move = reader.weighted_choice(self.board).move
-                return move if move in self.board.legal_moves else None
+            move = self._book_reader.weighted_choice(self.board).move
+            return move if move in self.board.legal_moves else None
         except IndexError:
+            self._book_exhausted = True
+            self._book_reader.close()
+            self._book_reader = None
             return None

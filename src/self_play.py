@@ -42,7 +42,6 @@ def generate_games_batched(
     over fp32 at no accuracy cost for inference.
     """
     # ── per-game state ────────────────────────────────────────────────────
-    print("  [dbg] initialising games...", flush=True)
     games    = [ChessGame(book_path=book_path) for _ in range(num_games)]
     roots    = [MCTSNode()                     for _ in range(num_games)]
     sim_cnts = [0] * num_games
@@ -51,8 +50,7 @@ def generate_games_batched(
     bufs: list[list[tuple[np.ndarray, np.ndarray, chess.Color]]] = \
         [[] for _ in range(num_games)]
 
-    active = list(range(num_games))   # indices of games still running
-    print("  [dbg] starting main self-play loop...", flush=True)
+    active: set[int] = set(range(num_games))   # indices of games still running
     _loop_iter = 0
 
     # ── main loop: one simulation step per active game per iteration ──────
@@ -110,9 +108,7 @@ def generate_games_batched(
                 if g.is_game_over() or plies[i] >= max_moves:
                     finished.append(i)
 
-        for i in finished:
-            if i in active:
-                active.remove(i)
+        active.difference_update(finished)
         if not active:
             break
 
@@ -135,8 +131,6 @@ def generate_games_batched(
             continue
 
         # ── 3. batch NN inference (bfloat16 on CUDA) ─────────────────────
-        if _loop_iter <= 3:
-            print(f"  [dbg] NN inference, batch={len(pending)}", flush=True)
         # games[i] is currently AT its leaf state (actions are still pushed)
         states_np = np.stack([games[i].encode() for i, _, _ in pending])
         x = torch.from_numpy(states_np).to(device)
@@ -147,14 +141,21 @@ def generate_games_batched(
                 logits_batch, value_batch = model(x)
 
         # ── 4. expand nodes, pop actions, backup ─────────────────────────
+        # One batched GPU→CPU transfer instead of N individual copies.
+        logits_all = logits_batch.float().cpu().numpy()
+        values_all = value_batch.squeeze(-1).float().cpu().numpy()
+
         for k, (i, path, actions) in enumerate(pending):
             g    = games[i]
             node = path[-1]
             is_root_expansion = (node is roots[i])
 
             # softmax over legal moves (fp32 for numerical safety)
-            logits = logits_batch[k].float().cpu().numpy()
-            mask   = g.legal_moves_mask()
+            legal = g.legal_move_indices()
+            mask  = np.zeros(POLICY_SIZE, dtype=bool)
+            for idx in legal:
+                mask[idx] = True
+            logits = logits_all[k]
             logits = np.where(mask, logits, -1e9)
             logits -= logits.max()
             exp_l  = np.exp(logits)
@@ -162,29 +163,27 @@ def generate_games_batched(
             policy /= policy.sum() + 1e-8
 
             # Dirichlet noise only at each game's root
-            if is_root_expansion:
-                legal = g.legal_move_indices()
-                if legal:
-                    noise = np.random.dirichlet([dirichlet_alpha] * len(legal))
-                    for j, idx in enumerate(legal):
-                        policy[idx] = (
-                            (1 - dirichlet_epsilon) * policy[idx]
-                            + dirichlet_epsilon * noise[j]
-                        )
-                    total = sum(policy[idx] for idx in legal)
-                    if total > 0:
-                        for idx in legal:
-                            policy[idx] /= total
+            if is_root_expansion and legal:
+                noise = np.random.dirichlet([dirichlet_alpha] * len(legal))
+                for j, idx in enumerate(legal):
+                    policy[idx] = (
+                        (1 - dirichlet_epsilon) * policy[idx]
+                        + dirichlet_epsilon * noise[j]
+                    )
+                total = sum(policy[idx] for idx in legal)
+                if total > 0:
+                    for idx in legal:
+                        policy[idx] /= total
 
-            # expand
-            for idx in g.legal_move_indices():
+            # expand (reuse legal list computed above)
+            for idx in legal:
                 node.children[idx] = MCTSNode(prior=float(policy[idx]))
             node.is_expanded = True
 
             if is_root_expansion:
                 node.visit_count = 1   # prime (matches MCTS.get_policy)
 
-            value = float(value_batch[k].item())
+            value = float(values_all[k])
 
             # restore game to its root position before backup
             for _ in actions:
