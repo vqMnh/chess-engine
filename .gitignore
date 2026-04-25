@@ -9,6 +9,13 @@ runs/
 # Drive Desktop temp folders
 .tmp.drivedownload/
 .tmp.driveupload/
+drive_structure.txt
+
+# Auto-generated files
+DEVLOG.html
+
+# Claude auto-memory
+memory/
 
 # Opening books (too large for git)
 books/*.bin

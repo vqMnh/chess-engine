@@ -1,6 +1,6 @@
 # Chess Engine — Dev Log
 
-## Training observations (iterations 1–70)
+## Training observations (iterations 1–87)
 
 ### Loss curve
 | Iteration | Policy loss | Value loss | Avg moves | Self-play time |
@@ -9,6 +9,7 @@
 | 32 | 2.615 | 0.042 | 57 | 348s |
 | 66 | 1.950 | 0.022 | 49 | 252s |
 | 71 | 1.889 | 0.021 | 47 | 224s |
+| 87 | 1.733 | 0.018 | 46 | 214s |
 
 - Loss is dropping consistently — no plateaus, no spikes. Training is healthy.
 - Policy loss < 2.0 at iter 66 is a milestone (near-random baseline is ~8.45).
@@ -26,6 +27,7 @@
 - **This is expected through ~iter 70.** Both challenger and best are similarly weak early on. Neither can convert an advantage into a checkmate.
 - **Iter 80: FIRST WIN.** 1 win, 19 draws, 0 losses. Win rate 0.525, ELO diff +17.4. Not promoted (needs 0.55) but model has learned to deliver checkmate. Prediction of 75–80 was correct.
 - Iter 85: back to 0 wins, 20 draws. Expected variance — model is on the edge of the threshold with only 20 eval games.
+- Next eval: iter 90. Watch for promotions as policy loss approaches 1.7.
 - Open question: are draws ending by move cap (250) or actual draw rules (stalemate, insufficient material)? Move-cap draws = engine hasn't learned to convert advantages. The `max_moves=100` change addresses this.
 
 ### Tail problem (long games)
