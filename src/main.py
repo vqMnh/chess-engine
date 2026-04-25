@@ -111,6 +111,11 @@ def train(
         trainer.load_checkpoint(trainer_ckpt)
         print(f"Resumed trainer from {trainer_ckpt}")
 
+    if not best_ckpt.exists():
+        best_net.load_state_dict(net.state_dict())
+        net.save(best_ckpt)
+        print(f"Bootstrapped best model from trainer → {best_ckpt}")
+
     buffer = ReplayBuffer(maxlen=buffer_maxlen)
     if buffer_ckpt.exists():
         buffer = ReplayBuffer.load(buffer_ckpt, maxlen=buffer_maxlen)
