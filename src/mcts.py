@@ -31,6 +31,69 @@ class MCTSNode:
         return -self.q_value + u
 
 
+# ---------------------------------------------------------------------------
+# Module-level primitives — used by both MCTS and BatchedSelfPlay
+# ---------------------------------------------------------------------------
+
+def _puct_select(node: MCTSNode, c_puct: float) -> tuple[int, MCTSNode]:
+    """Return the (action, child) with the highest PUCT score."""
+    best_score = -math.inf
+    best_action = -1
+    best_child: MCTSNode | None = None
+    for action, child in node.children.items():
+        score = child.puct_score(node.visit_count, c_puct)
+        if score > best_score:
+            best_score = score
+            best_action = action
+            best_child = child
+    return best_action, best_child  # type: ignore[return-value]
+
+
+def _run_selection(
+    root: MCTSNode,
+    game: ChessGame,
+    c_puct: float,
+) -> tuple[list[MCTSNode], list[int], bool, float]:
+    """Traverse from root using PUCT, pushing moves onto *game* in place.
+
+    No clone is made — the caller owns the push/pop contract:
+      - On return, game is at the leaf position (actions have been pushed).
+      - Caller must call ``game.pop()`` for every element of ``actions``.
+
+    Returns:
+        path:           Nodes from root to leaf (inclusive).
+        actions:        Move indices pushed onto game (undo with game.pop()).
+        is_terminal:    True when the leaf is a game-over state.
+        terminal_value: Value at a terminal leaf (current-player perspective).
+    """
+    node = root
+    path = [node]
+    actions: list[int] = []
+
+    while node.is_expanded and not game.is_game_over():
+        action, node = _puct_select(node, c_puct)
+        game.push_index(action)
+        actions.append(action)
+        path.append(node)
+
+    if game.is_game_over():
+        result = game.result()
+        return path, actions, True, 0.0 if not result else -1.0
+    return path, actions, False, 0.0
+
+
+def _do_backup(path: list[MCTSNode], value: float) -> None:
+    """Propagate value up the path, flipping sign at each edge."""
+    for n in reversed(path):
+        n.visit_count += 1
+        n.value_sum += value
+        value = -value
+
+
+# ---------------------------------------------------------------------------
+# Single-game MCTS (used by Evaluator; also kept for single-game self-play)
+# ---------------------------------------------------------------------------
+
 class MCTS:
     """AlphaZero-style MCTS guided by a neural network.
 
@@ -56,12 +119,7 @@ class MCTS:
 
     @torch.no_grad()
     def _evaluate(self, game: ChessGame) -> tuple[np.ndarray, float]:
-        """Neural-net inference on the current position.
-
-        Returns (policy, value) where policy is a masked, normalised probability
-        array of shape (POLICY_SIZE,) and value is a scalar in (−1, 1) from the
-        perspective of the player to move.
-        """
+        """Neural-net inference (batch=1). Returns (masked policy, value)."""
         x = torch.from_numpy(game.encode()).unsqueeze(0).to(self.device)
         logits, value = self.model(x)
 
@@ -95,49 +153,19 @@ class MCTS:
         node.is_expanded = True
         return value
 
-    def _select_child(self, node: MCTSNode) -> tuple[int, MCTSNode]:
-        """Return the (action, child) with the highest PUCT score."""
-        best_score = -math.inf
-        best_action = -1
-        best_child = None
-
-        for action, child in node.children.items():
-            score = child.puct_score(node.visit_count, self.c_puct)
-            if score > best_score:
-                best_score = score
-                best_action = action
-                best_child = child
-
-        return best_action, best_child  # type: ignore[return-value]
-
     def _simulate(self, root: MCTSNode, game: ChessGame) -> None:
-        """Run one simulation: select → expand → backup."""
-        node = root
-        sim_game = game.clone()
-        path = [node]
+        """One simulation using push/pop — no game.clone() needed."""
+        path, actions, is_terminal, terminal_value = _run_selection(root, game, self.c_puct)
 
-        # Selection: follow PUCT until an unexpanded or terminal node
-        while node.is_expanded and not sim_game.is_game_over():
-            action, node = self._select_child(node)
-            sim_game.push_index(action)
-            path.append(node)
-
-        # Evaluation
-        if sim_game.is_game_over():
-            result = sim_game.result()
-            # None or 0.0 → draw; any non-zero result → current player lost
-            # (at game-over the player to move is checkmated or stalemated)
-            value = 0.0 if not result else -1.0
+        if is_terminal:
+            value = terminal_value
         else:
-            value = self._expand(node, sim_game)
+            value = self._expand(path[-1], game)   # game is at leaf state
 
-        # Backup: propagate value upward, flipping sign at each edge.
-        # node.value_sum accumulates values from that node's player's perspective,
-        # so the parent sees the negation.
-        for n in reversed(path):
-            n.visit_count += 1
-            n.value_sum += value
-            value = -value
+        for _ in actions:
+            game.pop()                             # restore game to root position
+
+        _do_backup(path, value)
 
     def get_policy(
         self,
@@ -145,22 +173,19 @@ class MCTS:
         temperature: float = 1.0,
         add_noise: bool = True,
     ) -> np.ndarray:
-        """Run MCTS from the current position and return an improved policy.
+        """Run MCTS and return an improved policy for the current position.
 
         Args:
             game:        Position to search. Not mutated.
-            temperature: 1.0 = proportional to visit counts (early-game exploration);
-                         0.0 = greedy argmax (evaluation / late game).
-            add_noise:   Inject Dirichlet noise at root. Use True during self-play,
-                         False during head-to-head evaluation.
+            temperature: 1.0 = proportional to visit counts; 0.0 = greedy argmax.
+            add_noise:   Dirichlet noise at root (True for self-play, False for eval).
 
         Returns:
-            Float32 array of shape (POLICY_SIZE,), non-zero only at legal moves.
+            Float32 (POLICY_SIZE,) array, non-zero only at legal moves.
         """
         root = MCTSNode()
         self._expand(root, game, add_noise=add_noise)
-        # Prime visit count so the first simulation's PUCT exploration is non-zero.
-        root.visit_count = 1
+        root.visit_count = 1  # prime so first-simulation PUCT exploration is non-zero
 
         for _ in range(self.num_simulations):
             self._simulate(root, game)

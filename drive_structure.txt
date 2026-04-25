@@ -1,0 +1,39 @@
+chess-engine/                        ← folder root in My Drive
+│
+├── requirements.txt
+│
+├── src/
+│   ├── __init__.py
+│   ├── game.py
+│   ├── model.py
+│   ├── mcts.py
+│   ├── self_play.py
+│   ├── replay_buffer.py
+│   ├── trainer.py
+│   ├── evaluator.py
+│   └── main.py
+│
+├── notebooks/
+│   └── train_colab.ipynb
+│
+├── books/
+│   └── gm2001.bin
+│
+├── checkpoints/               ← created by Colab on first run
+│   ├── best.pt
+│   ├── trainer.pt
+│   └── state.pt
+│
+├── data/                      ← created by Colab on first run
+│   └── buffer.npz
+│
+└── runs/
+    └── elo_log.csv
+
+--- DO NOT upload ---
+.venv/                         local Python env, not needed on Drive
+.git/                          version control, not needed on Drive
+__pycache__/                   auto-generated, ignored
+.gitkeep                       placeholder files, ignore
+CLAUDE.md                      local dev notes, not needed by Colab
+.gitignore                     not needed by Colab
