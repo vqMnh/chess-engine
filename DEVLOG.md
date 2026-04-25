@@ -25,6 +25,7 @@
 - Win rate hovers at ~0.475–0.500 — just below the 0.55 promotion threshold
 - **This is expected through ~iter 70.** Both challenger and best are similarly weak early on. Neither can convert an advantage into a checkmate.
 - **Iter 80: FIRST WIN.** 1 win, 19 draws, 0 losses. Win rate 0.525, ELO diff +17.4. Not promoted (needs 0.55) but model has learned to deliver checkmate. Prediction of 75–80 was correct.
+- Iter 85: back to 0 wins, 20 draws. Expected variance — model is on the edge of the threshold with only 20 eval games.
 - Open question: are draws ending by move cap (250) or actual draw rules (stalemate, insufficient material)? Move-cap draws = engine hasn't learned to convert advantages. The `max_moves=100` change addresses this.
 
 ### Tail problem (long games)
