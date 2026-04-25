@@ -42,6 +42,7 @@ def generate_games_batched(
     over fp32 at no accuracy cost for inference.
     """
     # ── per-game state ────────────────────────────────────────────────────
+    print("  [dbg] initialising games...", flush=True)
     games    = [ChessGame(book_path=book_path) for _ in range(num_games)]
     roots    = [MCTSNode()                     for _ in range(num_games)]
     sim_cnts = [0] * num_games
@@ -51,9 +52,14 @@ def generate_games_batched(
         [[] for _ in range(num_games)]
 
     active = list(range(num_games))   # indices of games still running
+    print("  [dbg] starting main self-play loop...", flush=True)
+    _loop_iter = 0
 
     # ── main loop: one simulation step per active game per iteration ──────
     while active:
+        _loop_iter += 1
+        if _loop_iter <= 3 or _loop_iter % 500 == 0:
+            print(f"  [dbg] loop iter {_loop_iter}, active={len(active)}", flush=True)
 
         # ── 1. advance book moves; flush games that have enough sims ─────
         finished: list[int] = []
@@ -129,6 +135,8 @@ def generate_games_batched(
             continue
 
         # ── 3. batch NN inference (bfloat16 on CUDA) ─────────────────────
+        if _loop_iter <= 3:
+            print(f"  [dbg] NN inference, batch={len(pending)}", flush=True)
         # games[i] is currently AT its leaf state (actions are still pushed)
         states_np = np.stack([games[i].encode() for i, _, _ in pending])
         x = torch.from_numpy(states_np).to(device)

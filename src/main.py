@@ -85,13 +85,7 @@ def train(
     best_net = ChessNet(num_blocks=num_blocks, num_filters=num_filters).to(device)
     best_net.load_state_dict(net.state_dict())
 
-    # Compile for inference: fuses ops and reduces CUDA kernel-launch overhead.
-    # Shares weights with net — training updates are reflected automatically.
-    if device.type == "cuda":
-        inference_net = torch.compile(net, mode="reduce-overhead")
-        print("torch.compile enabled for self-play inference")
-    else:
-        inference_net = net
+    inference_net = net
 
     # ------------------------------------------------------------------
     # Trainer / buffer
