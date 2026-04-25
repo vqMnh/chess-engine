@@ -1,4 +1,4 @@
-"""Self-play loop: generates (state, π, z) training tuples via MCTS-guided games."""
+"""Batched self-play: generates (state, π, z) training tuples via parallel MCTS-guided games."""
 
 import numpy as np
 import torch
@@ -6,7 +6,7 @@ import chess
 from pathlib import Path
 
 from game import ChessGame, POLICY_SIZE
-from mcts import MCTS, MCTSNode, _run_selection, _do_backup
+from mcts import MCTSNode, _run_selection, _do_backup
 
 SelfPlayExample = tuple[np.ndarray, np.ndarray, float]
 
@@ -14,67 +14,7 @@ _TEMP_THRESHOLD = 30   # half-moves before switching to greedy
 
 
 # ---------------------------------------------------------------------------
-# Single-game (kept for reference / CPU debugging)
-# ---------------------------------------------------------------------------
-
-def play_game(
-    model: torch.nn.Module,
-    device: torch.device,
-    num_simulations: int = 200,
-    c_puct: float = 1.5,
-    book_path: Path | None = None,
-    max_moves: int = 512,
-) -> list[SelfPlayExample]:
-    """Play one self-play game. Book moves are skipped from the training buffer."""
-    game = ChessGame(book_path=book_path)
-    mcts = MCTS(model, device, num_simulations=num_simulations, c_puct=c_puct)
-    buffer: list[tuple[np.ndarray, np.ndarray, chess.Color]] = []
-
-    ply = 0
-    while not game.is_game_over() and ply < max_moves:
-        book_move = game.book_move()
-        if book_move is not None:
-            game.push(book_move)
-            ply += 1
-            continue
-
-        temperature = 1.0 if ply < _TEMP_THRESHOLD else 0.0
-        state  = game.encode()
-        policy = mcts.get_policy(game, temperature=temperature, add_noise=True)
-        buffer.append((state, policy, game.turn))
-
-        legal = game.legal_move_indices()
-        probs = np.array([policy[i] for i in legal], dtype=np.float64)
-        probs /= probs.sum()
-        game.push_index(int(np.random.choice(legal, p=probs)))
-        ply += 1
-
-    result = game.result() or 0.0
-    return [
-        (s, p, float(result) if t == chess.WHITE else -float(result))
-        for s, p, t in buffer
-    ]
-
-
-def generate_games(
-    model: torch.nn.Module,
-    device: torch.device,
-    num_games: int,
-    num_simulations: int = 200,
-    c_puct: float = 1.5,
-    book_path: Path | None = None,
-    max_moves: int = 512,
-) -> list[SelfPlayExample]:
-    """Sequential wrapper around play_game (CPU / debugging use)."""
-    examples: list[SelfPlayExample] = []
-    for _ in range(num_games):
-        examples.extend(play_game(model, device, num_simulations, c_puct,
-                                   book_path, max_moves))
-    return examples
-
-
-# ---------------------------------------------------------------------------
-# Batched self-play — the fast path for GPU training
+# Batched self-play
 # ---------------------------------------------------------------------------
 
 def generate_games_batched(

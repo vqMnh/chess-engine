@@ -158,12 +158,6 @@ class ChessGame:
     def reset(self) -> None:
         self.board.reset()
 
-    def clone(self) -> "ChessGame":
-        g = object.__new__(ChessGame)
-        g.board = self.board.copy()
-        g._book_path = self._book_path
-        return g
-
     def __repr__(self) -> str:
         return f"ChessGame(fen={self.board.fen()!r})"
 
@@ -172,13 +166,6 @@ class ChessGame:
     @property
     def turn(self) -> chess.Color:
         return self.board.turn
-
-    @property
-    def fullmove_number(self) -> int:
-        return self.board.fullmove_number
-
-    def fen(self) -> str:
-        return self.board.fen()
 
     # --- Move handling ---
 
@@ -190,9 +177,6 @@ class ChessGame:
 
     def push_index(self, idx: int) -> None:
         self.board.push(index_to_move(idx, self.board))
-
-    def legal_moves(self) -> list[chess.Move]:
-        return list(self.board.legal_moves)
 
     def legal_move_indices(self) -> list[int]:
         turn = self.board.turn

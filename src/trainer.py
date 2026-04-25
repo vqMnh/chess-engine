@@ -45,8 +45,6 @@ class Trainer:
         values: "np.ndarray",
     ) -> tuple[float, float, float]:
         """One forward+backward pass. Returns (policy_loss, value_loss, total_loss)."""
-        import numpy as np
-
         self.model.train()
 
         s = torch.from_numpy(states).to(self.device)

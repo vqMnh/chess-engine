@@ -9,10 +9,10 @@ All modules fully implemented and tested. Training runs on Google Colab Pro (A10
 
 | Module | Status | Notes |
 |---|---|---|
-| `game.py` | ✅ complete | Board encoding, move↔index, legal-move mask, result, opening book |
+| `game.py` | ✅ complete | Board encoding, move↔index, legal-move mask, result, opening book (no clone) |
 | `model.py` | ✅ complete | ResNet 10×128, policy+value heads, save/load with arch config |
 | `mcts.py` | ✅ complete | PUCT, Dirichlet noise, push/pop (no clone), module-level primitives |
-| `self_play.py` | ✅ complete | Sequential `play_game` + batched `generate_games_batched` |
+| `self_play.py` | ✅ complete | Batched `generate_games_batched` — all games in parallel, one NN pass per sim step |
 | `replay_buffer.py` | ✅ complete | Circular deque, sample, save/load (.npz) |
 | `trainer.py` | ✅ complete | CE+MSE loss, cosine LR, checkpoint (model+optimizer) |
 | `evaluator.py` | ✅ complete | Head-to-head eval, promotion logic, ELO log |
@@ -36,8 +36,8 @@ Colab Drive path: `/content/drive/MyDrive/chess-engine`
 - PUCT formula: `score(s,a) = -Q(child) + c_puct × P(s,a) × √N(s) / (1 + N(s,a))`
 - `Q` stored from each node's own player's perspective; negated when selecting from parent
 - **No `game.clone()`** — selection uses push/pop on the original game object (~3× faster)
-- Module-level primitives `_run_selection`, `_do_backup`, `_puct_select` shared by both
-  the single-game `MCTS` class and `generate_games_batched`
+- Module-level primitives `_run_selection`, `_do_backup`, `_puct_select` shared by
+  the `MCTS` class (used by `Evaluator`) and `generate_games_batched`
 - Root primed to `visit_count=1` before simulations so first PUCT exploration is non-zero
 - Dirichlet noise (`α=0.3, ε=0.25`) added at root during self-play only
 
@@ -124,7 +124,7 @@ chess-engine/
 │   ├── game.py                ← chess environment (python-chess wrapper)
 │   ├── model.py               ← ResNet policy + value network
 │   ├── mcts.py                ← MCTS with PUCT + module-level primitives
-│   ├── self_play.py           ← sequential play_game + generate_games_batched
+│   ├── self_play.py           ← generate_games_batched (GPU batched self-play)
 │   ├── replay_buffer.py       ← circular buffer, sample, save/load
 │   ├── trainer.py             ← CE+MSE loss, cosine LR, checkpointing
 │   ├── evaluator.py           ← head-to-head eval, promotion, ELO log
