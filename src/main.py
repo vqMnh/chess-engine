@@ -130,21 +130,30 @@ def train(
         print(f"Resuming from iteration {start_iter}")
 
     # ------------------------------------------------------------------
-    # Per-iteration CSV log
+    # Per-iteration CSV log (buffered — flushed every save_every iters)
     # ------------------------------------------------------------------
+    _pending_rows: list[dict] = []
+
     def _log_iter(row: dict) -> None:
+        _pending_rows.append(row)
+
+    def _flush_log() -> None:
+        if not _pending_rows:
+            return
         train_log_path.parent.mkdir(parents=True, exist_ok=True)
         write_header = not train_log_path.exists() or train_log_path.stat().st_size == 0
         with open(train_log_path, "a") as f:
             if write_header:
                 f.write("iteration,sp_time_s,avg_moves,examples,train_loss,"
                         "pol_loss,val_loss,iter_time_s\n")
-            f.write(
-                f"{row['iteration']},{row['sp_time_s']:.1f},{row['avg_moves']:.1f},"
-                f"{row['examples']},{row.get('train_loss', '')},"
-                f"{row.get('pol_loss', '')},{row.get('val_loss', '')},"
-                f"{row['iter_time_s']:.1f}\n"
-            )
+            for row in _pending_rows:
+                f.write(
+                    f"{row['iteration']},{row['sp_time_s']:.1f},{row['avg_moves']:.1f},"
+                    f"{row['examples']},{row.get('train_loss', '')},"
+                    f"{row.get('pol_loss', '')},{row.get('val_loss', '')},"
+                    f"{row['iter_time_s']:.1f}\n"
+                )
+        _pending_rows.clear()
 
     # ------------------------------------------------------------------
     # Main loop
@@ -223,6 +232,7 @@ def train(
             trainer.save_checkpoint(trainer_ckpt)
             buffer.save(buffer_ckpt)
             torch.save({"iteration": iteration}, state_file)
+            _flush_log()
             print(f"  checkpoint saved (iter {iteration})")
 
     print("\nTraining complete.")
