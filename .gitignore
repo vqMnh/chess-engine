@@ -1,24 +1,13 @@
-# Virtual environment
+# Virtual environment — install from requirements.txt instead
 .venv/
 
-# Training artifacts (managed via Drive sync, not git)
-checkpoints/
-data/
-runs/
+# Claude internals — not part of the project
+memory/
+.claude/
 
 # Drive Desktop temp folders
 .tmp.drivedownload/
 .tmp.driveupload/
-drive_structure.txt
-
-# Auto-generated files
-DEVLOG.html
-
-# Claude auto-memory
-memory/
-
-# Opening books (too large for git)
-books/*.bin
 
 # Python
 __pycache__/
@@ -31,15 +20,11 @@ build/
 
 # Jupyter
 .ipynb_checkpoints/
+report/figures/
 
-# OS
+# OS / IDE
 .DS_Store
 Thumbs.db
-
-# IDE
 .vscode/
 .idea/
 *.swp
-
-# Claude Code
-.claude/

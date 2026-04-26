@@ -12,6 +12,7 @@ from mcts import MCTSNode, _run_selection, _do_backup
 SelfPlayExample = tuple[np.ndarray, np.ndarray, float]
 
 _TEMP_THRESHOLD = 30   # half-moves before switching to greedy
+_RANDOM_PLIES   = 4    # random moves played before MCTS to diversify openings
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +89,15 @@ def generate_games_batched(
                 if bm is None:
                     break
                 g.push(bm)
+                plies[i] += 1
+
+            # random opening plies — push random legal moves before MCTS kicks in
+            # so every game starts from a different position
+            while plies[i] < _RANDOM_PLIES and not g.is_game_over() and plies[i] < max_moves:
+                legal = g.legal_move_indices()
+                if not legal:
+                    break
+                g.push_index(int(np.random.choice(legal)))
                 plies[i] += 1
 
             if g.is_game_over() or plies[i] >= max_moves:
